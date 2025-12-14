@@ -13,7 +13,7 @@ from textual.widget import Widget
 from textual.widgets import Static
 
 from vibe.cli.clipboard import copy_selection_to_clipboard
-from vibe.cli.commands import CommandRegistry
+from vibe.cli.commands import Command, CommandRegistry
 from vibe.cli.textual_ui.handlers.event_handler import EventHandler
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
@@ -46,7 +46,7 @@ from vibe.core import __version__ as CORE_VERSION
 from vibe.core.agent import Agent
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
 from vibe.core.config import VibeConfig
-from vibe.core.config_path import HISTORY_FILE
+from vibe.core.config_path import COMMANDS_DIR, GLOBAL_COMMANDS_DIR, HISTORY_FILE
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.types import ApprovalResponse, LLMMessage, ResumeSessionInfo, Role
 from vibe.core.utils import (
@@ -107,6 +107,12 @@ class VibeApp(App):
 
         self.event_handler: EventHandler | None = None
         self.commands = CommandRegistry()
+        # Load dynamic commands from both project and user directories
+        # Project commands take precedence over user commands
+        self.commands.load_dynamic_commands(
+            project_commands_dir=COMMANDS_DIR.path,
+            user_commands_dir=GLOBAL_COMMANDS_DIR.path,
+        )
 
         self._chat_input_container: ChatInputContainer | None = None
         self._mode_indicator: ModeIndicator | None = None
@@ -306,12 +312,21 @@ class VibeApp(App):
             VibeConfig.save_updates(updates)
 
     async def _handle_command(self, user_input: str) -> bool:
-        if command := self.commands.find_command(user_input):
-            handler = getattr(self, command.handler)
-            if asyncio.iscoroutinefunction(handler):
-                await handler()
+        # Parse command and arguments
+        parts = user_input.split(maxsplit=1)
+        command_part = parts[0]
+        arguments = parts[1] if len(parts) > 1 else ""
+
+        if command := self.commands.find_command(command_part):
+            # Handle dynamic commands differently
+            if command.is_dynamic:
+                await self._handle_dynamic_command(command, arguments)
             else:
-                handler()
+                handler = getattr(self, command.handler)
+                if asyncio.iscoroutinefunction(handler):
+                    await handler()
+                else:
+                    handler()
             return True
         return False
 
@@ -357,6 +372,54 @@ class VibeApp(App):
             await self._mount_and_scroll(
                 ErrorMessage(f"Command failed: {e}", collapsed=self._tools_collapsed)
             )
+
+    async def _handle_dynamic_command(self, command: Command, arguments: str = "") -> None:
+        """Handle dynamic commands loaded from markdown files.
+
+        Dynamic commands send their content as a user message to the agent,
+        with placeholder substitution for arguments.
+
+        Args:
+            command: The dynamic command to handle
+            arguments: Arguments passed to the command (everything after the command name)
+        """
+        if not command.content:
+            return
+
+        # Substitute argument placeholders
+        content = self._substitute_command_arguments(command.content, arguments)
+        await self._handle_user_message(content)
+
+    def _substitute_command_arguments(self, content: str, arguments: str) -> str:
+        """Substitute argument placeholders in command content.
+
+        Supports:
+        - $ARGUMENTS: All arguments as a single string
+        - $1, $2, $3, etc.: Individual positional arguments
+
+        Args:
+            content: The command content with placeholders
+            arguments: The arguments string to substitute
+
+        Returns:
+            Content with placeholders replaced
+        """
+        # Split arguments into positional parameters
+        arg_list = arguments.split() if arguments else []
+
+        # Substitute $ARGUMENTS with the full arguments string
+        result = content.replace("$ARGUMENTS", arguments)
+
+        # Substitute positional parameters $1, $2, etc.
+        for i, arg in enumerate(arg_list, start=1):
+            result = result.replace(f"${i}", arg)
+
+        # Replace unused positional parameters with empty string
+        # Check up to $20 to handle most use cases
+        for i in range(len(arg_list) + 1, 21):
+            result = result.replace(f"${i}", "")
+
+        return result
 
     async def _handle_user_message(self, message: str) -> None:
         init_task = self._ensure_agent_init_task()

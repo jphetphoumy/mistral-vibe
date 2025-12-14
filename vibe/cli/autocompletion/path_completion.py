@@ -40,8 +40,10 @@ class PathCompletionController:
             return False
 
         fragment = before_cursor[at_index:cursor_index]
-        # fragment must not be empty (including @) and not contain any spaces
-        return bool(fragment) and " " not in fragment
+        # fragment must not be empty (including @)
+        # Allow spaces before the @, but not after it (in the fragment)
+        fragment_after_at = fragment[1:] if len(fragment) > 1 else ""
+        return bool(fragment) and " " not in fragment_after_at
 
     def reset(self) -> None:
         with self._query_lock:

@@ -16,7 +16,21 @@ class SlashCommandController:
         self._selected_index = 0
 
     def can_handle(self, text: str, cursor_index: int) -> bool:
-        return text.startswith("/")
+        # Only handle if text starts with "/" AND cursor is before the first space
+        # This allows path completion (@) to work in command arguments
+        if not text.startswith("/"):
+            return False
+
+        # Find the first space
+        space_index = text.find(" ")
+
+        # If there's no space, we're still typing the command
+        if space_index == -1:
+            return True
+
+        # If cursor is before the space, we're typing the command
+        # If cursor is after the space, we're typing arguments (let path completion handle it)
+        return cursor_index <= space_index
 
     def reset(self) -> None:
         if self._suggestions:
